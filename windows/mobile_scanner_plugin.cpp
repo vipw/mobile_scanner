@@ -363,10 +363,14 @@ void MobileScannerPlugin::OnCaptureStarted(
 }
 
 void MobileScannerPlugin::OnCaptureError(int generation, HRESULT hr) {
-  if (generation != start_generation_ || !event_sink_) {
+  if (generation != start_generation_) {
     return;
   }
-  event_sink_->Error(kCameraError, HResultMessage(hr));
+  // The capture thread has exited, so release it to allow starting again.
+  StopCapture();
+  if (event_sink_) {
+    event_sink_->Error(kCameraError, HResultMessage(hr));
+  }
 }
 
 void MobileScannerPlugin::StopCapture() {
