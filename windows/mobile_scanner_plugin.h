@@ -118,13 +118,18 @@ class MobileScannerPlugin : public flutter::Plugin {
   // on mobile devices.
   std::atomic<bool> mirror_ = false;
 
-  // Preview texture. `buffer_mutex_` guards the pixel buffer, which is written
-  // by the capture thread and read by the raster thread.
+  // Preview pixels, written by the capture thread and read by the raster
+  // thread. Shared with the texture callback, since the engine may still call
+  // it after an asynchronous unregister, when the plugin may be destroyed.
+  struct PreviewBuffer {
+    std::mutex mutex;
+    std::vector<uint8_t> rgba;
+    FlutterDesktopPixelBuffer pixel_buffer = {};
+  };
+
   std::unique_ptr<flutter::TextureVariant> texture_;
   std::atomic<int64_t> texture_id_ = -1;
-  std::mutex buffer_mutex_;
-  std::vector<uint8_t> rgba_buffer_;
-  FlutterDesktopPixelBuffer pixel_buffer_ = {};
+  std::shared_ptr<PreviewBuffer> preview_ = std::make_shared<PreviewBuffer>();
 
   // Live frames are scanned on `scan_worker_`, and `analyzeImage` runs on
   // `analyze_worker_`, so neither blocks the camera or the UI.

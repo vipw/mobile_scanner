@@ -491,11 +491,12 @@ void MobileScannerPlugin::OnFrame(int generation, const uint8_t* bgra,
 
   {
     // Flutter's pixel buffer textures expect RGBA.
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    rgba_buffer_.resize(static_cast<size_t>(width) * height * 4);
+    std::lock_guard<std::mutex> lock(preview_->mutex);
+    std::vector<uint8_t>& rgba = preview_->rgba;
+    rgba.resize(static_cast<size_t>(width) * height * 4);
     for (int y = 0; y < height; y++) {
       const uint8_t* src = bgra + static_cast<ptrdiff_t>(y) * stride;
-      uint8_t* dst = rgba_buffer_.data() + static_cast<size_t>(y) * width * 4;
+      uint8_t* dst = rgba.data() + static_cast<size_t>(y) * width * 4;
       int dst_step = 4;
       if (mirror) {
         dst += static_cast<size_t>(width - 1) * 4;
@@ -508,8 +509,8 @@ void MobileScannerPlugin::OnFrame(int generation, const uint8_t* bgra,
         dst[3] = 0xFF;
       }
     }
-    pixel_buffer_.width = static_cast<size_t>(width);
-    pixel_buffer_.height = static_cast<size_t>(height);
+    preview_->pixel_buffer.width = static_cast<size_t>(width);
+    preview_->pixel_buffer.height = static_cast<size_t>(height);
   }
   texture_registrar_->MarkTextureFrameAvailable(texture_id_);
 
@@ -634,21 +635,21 @@ void MobileScannerPlugin::SendBarcodes(EncodableList barcodes,
 
 int64_t MobileScannerPlugin::RegisterTexture() {
   texture_ = std::make_unique<flutter::TextureVariant>(
-      flutter::PixelBufferTexture([this](size_t, size_t)
+      flutter::PixelBufferTexture([preview = preview_](size_t, size_t)
                                       -> const FlutterDesktopPixelBuffer* {
         // The lock is held until the engine has copied the buffer and calls
         // the release callback.
-        buffer_mutex_.lock();
-        if (rgba_buffer_.empty()) {
-          buffer_mutex_.unlock();
+        preview->mutex.lock();
+        if (preview->rgba.empty()) {
+          preview->mutex.unlock();
           return nullptr;
         }
-        pixel_buffer_.buffer = rgba_buffer_.data();
-        pixel_buffer_.release_context = &buffer_mutex_;
-        pixel_buffer_.release_callback = [](void* mutex) {
+        preview->pixel_buffer.buffer = preview->rgba.data();
+        preview->pixel_buffer.release_context = &preview->mutex;
+        preview->pixel_buffer.release_callback = [](void* mutex) {
           static_cast<std::mutex*>(mutex)->unlock();
         };
-        return &pixel_buffer_;
+        return &preview->pixel_buffer;
       }));
   texture_id_ = texture_registrar_->RegisterTexture(texture_.get());
   return texture_id_;
@@ -664,8 +665,8 @@ void MobileScannerPlugin::UnregisterTexture() {
   texture_registrar_->UnregisterTexture(texture_id_, [texture]() {});
   texture_id_ = -1;
 
-  std::lock_guard<std::mutex> lock(buffer_mutex_);
-  rgba_buffer_.clear();
+  std::lock_guard<std::mutex> lock(preview_->mutex);
+  preview_->rgba.clear();
 }
 
 EncodableMap MobileScannerPlugin::BuildStartResult(
