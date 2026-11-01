@@ -131,6 +131,13 @@ TEST(ParseVCard, QuotedPrintableSoftBreakKeepsLeadingSpace) {
   EXPECT_EQ(String(Map(*contact, "name"), "formattedName"), "Jo hn");
 }
 
+TEST(ParseVCard, QuotedPrintableEscapeFoldedAfterEquals) {
+  const auto contact = ParseVCard(
+      "BEGIN:VCARD\nFN;ENCODING=QUOTED-PRINTABLE:M=\n C3=BCller\nEND:VCARD");
+  ASSERT_TRUE(contact);
+  EXPECT_EQ(String(Map(*contact, "name"), "formattedName"), "M\xC3\xBCller");
+}
+
 TEST(ParseVCard, Version4FoldedLinesGroupsAndUris) {
   const auto contact = ParseVCard(
       "BEGIN:VCARD\r\n"

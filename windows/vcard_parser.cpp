@@ -167,17 +167,23 @@ std::vector<ContentLine> ParseContentLines(const std::string& text) {
 
   std::vector<std::string> logical_lines;
   for (const std::string& physical : physical_lines) {
-    // Checked before folding, since the continuation of a soft line break can
-    // start with whitespace that is part of the value.
+    const bool starts_with_space =
+        !physical.empty() && (physical[0] == ' ' || physical[0] == '\t');
+    // A line ending in '=' is a soft line break, and its continuation can
+    // start with whitespace that is part of the value. The exception is a
+    // line folded in the middle of an escape ("=" + " XX"), which is unfolded.
+    const bool folded_escape =
+        starts_with_space && physical.size() >= 3 &&
+        std::isxdigit(static_cast<unsigned char>(physical[1])) &&
+        std::isxdigit(static_cast<unsigned char>(physical[2]));
     if (!logical_lines.empty() && !logical_lines.back().empty() &&
-        logical_lines.back().back() == '=' &&
+        logical_lines.back().back() == '=' && !folded_escape &&
         ToUpper(logical_lines.back()).find("QUOTED-PRINTABLE") !=
             std::string::npos) {
       // Quoted-printable soft line break.
       logical_lines.back().pop_back();
       logical_lines.back() += physical;
-    } else if (!logical_lines.empty() && !physical.empty() &&
-               (physical[0] == ' ' || physical[0] == '\t')) {
+    } else if (!logical_lines.empty() && starts_with_space) {
       // RFC folding: a line starting with whitespace continues the previous.
       logical_lines.back() += physical.substr(1);
     } else if (!Trim(physical).empty()) {
