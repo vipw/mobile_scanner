@@ -21,6 +21,8 @@
 #include <cstdlib>
 #include <limits>
 #include <mutex>
+#include <set>
+#include <string>
 #include <utility>
 
 namespace mobile_scanner {
@@ -34,10 +36,11 @@ constexpr DWORD kVideoStream =
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 720;
 
-// Cameras that have been stopped but are still being released.
+// Symbolic links of cameras that have been stopped but are still being
+// released.
 std::mutex g_release_mutex;
 std::condition_variable g_release_done;
-int g_pending_releases = 0;
+std::multiset<std::wstring> g_releasing;
 
 // Panel values from the ACPI _PLD (physical location of device) buffer.
 constexpr BYTE kPldPanelFront = 4;
@@ -255,6 +258,37 @@ HRESULT GetFrameFormat(IMFSourceReader* reader, FrameFormat* format) {
   return hr;
 }
 
+// Releasing a camera can take several hundred milliseconds, so it is done on
+// a background thread.
+void ReleaseInBackground(const std::wstring& symbolic_link,
+                         ComPtr<IMFMediaSource> source,
+                         ComPtr<IMFSourceReader> reader) {
+  if (!source && !reader) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_release_mutex);
+    g_releasing.insert(symbolic_link);
+  }
+  std::thread([symbolic_link, source = std::move(source),
+               reader = std::move(reader)]() mutable {
+    const HRESULT co_init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (source) {
+      source->Shutdown();
+    }
+    reader.Reset();
+    source.Reset();
+    if (SUCCEEDED(co_init)) {
+      CoUninitialize();
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_release_mutex);
+      g_releasing.erase(g_releasing.find(symbolic_link));
+    }
+    g_release_done.notify_all();
+  }).detach();
+}
+
 }  // namespace
 
 std::vector<CameraDevice> EnumerateCameras() {
@@ -292,6 +326,7 @@ std::vector<CameraDevice> EnumerateCameras() {
 // State shared between the capture and the reader callback, which Media
 // Foundation may keep alive after the capture is stopped.
 struct CameraCapture::State {
+  std::wstring symbolic_link;
   // Guards everything below. Held while a frame is delivered, so that once
   // `stopped` is set no callback is running or will run.
   std::mutex mutex;
@@ -400,6 +435,7 @@ void CameraCapture::Start(
     ErrorCallback on_error) {
   Stop();
   state_ = std::make_shared<State>();
+  state_->symbolic_link = symbolic_link;
   state_->on_frame = std::move(on_frame);
   state_->on_error = std::move(on_error);
   open_thread_ = std::thread(&CameraCapture::Open, state_, symbolic_link,
@@ -436,40 +472,15 @@ void CameraCapture::Stop() {
     source = std::move(state_->source);
     reader = std::move(state_->reader);
   }
+  ReleaseInBackground(state_->symbolic_link, std::move(source),
+                      std::move(reader));
   state_ = nullptr;
-  if (!source && !reader) {
-    return;
-  }
-
-  // Releasing the camera can take several hundred milliseconds, so it is done
-  // in the background.
-  {
-    std::lock_guard<std::mutex> lock(g_release_mutex);
-    g_pending_releases++;
-  }
-  std::thread([source = std::move(source),
-               reader = std::move(reader)]() mutable {
-    const HRESULT co_init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (source) {
-      source->Shutdown();
-    }
-    reader.Reset();
-    source.Reset();
-    if (SUCCEEDED(co_init)) {
-      CoUninitialize();
-    }
-    {
-      std::lock_guard<std::mutex> lock(g_release_mutex);
-      g_pending_releases--;
-    }
-    g_release_done.notify_all();
-  }).detach();
 }
 
 // static
 void CameraCapture::WaitForPendingReleases() {
   std::unique_lock<std::mutex> lock(g_release_mutex);
-  g_release_done.wait(lock, [] { return g_pending_releases == 0; });
+  g_release_done.wait(lock, [] { return g_releasing.empty(); });
 }
 
 // static
@@ -486,7 +497,7 @@ void CameraCapture::Open(std::shared_ptr<State> state,
     g_release_done.wait(lock, [&] {
       std::lock_guard<std::mutex> state_lock(state->mutex);
       stopped = state->stopped;
-      return stopped || g_pending_releases == 0;
+      return stopped || g_releasing.count(symbolic_link) == 0;
     });
   }
 
@@ -517,11 +528,18 @@ void CameraCapture::Open(std::shared_ptr<State> state,
   if (started) {
     hr = reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr,
                             nullptr);
-  }
-  if (!started || FAILED(hr)) {
-    if (source) {
-      source->Shutdown();
+    if (FAILED(hr)) {
+      // Stop() is waiting for this thread, so it cannot have taken these yet.
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->source.Reset();
+      state->reader.Reset();
+      started = false;
     }
+  }
+  if (!started) {
+    // Released in the background, since Stop() may be waiting for this
+    // thread on the platform thread.
+    ReleaseInBackground(symbolic_link, std::move(source), std::move(reader));
   }
   on_started(hr, format.width, format.height);
 
