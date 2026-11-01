@@ -175,6 +175,14 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
     _platformSessionOwner = null;
   }
 
+  /// The controller that currently holds the platform camera session,
+  /// or `null` if no controller holds it.
+  ///
+  /// This is only intended for use in tests.
+  @visibleForTesting
+  static MobileScannerController? get platformSessionOwner =>
+      _platformSessionOwner;
+
   void _disposeListeners() {
     unawaited(_barcodesSubscription?.cancel());
     unawaited(_torchStateSubscription?.cancel());
@@ -489,10 +497,15 @@ class MobileScannerController extends ValueNotifier<MobileScannerState> {
         options,
       );
 
-      // This controller now holds the platform camera session.
-      _platformSessionOwner = this;
-
       if (!_isDisposed) {
+        // This controller now holds the platform camera session.
+        //
+        // Not claimed when the controller was disposed while the camera was
+        // being acquired: the session would then point at a dead controller,
+        // and the next controller to dispose would skip the platform
+        // teardown, leaving the camera live.
+        _platformSessionOwner = this;
+
         value = value.copyWith(
           availableCameras: viewAttributes.numberOfCameras,
           cameraDirection: viewAttributes.cameraDirection,
