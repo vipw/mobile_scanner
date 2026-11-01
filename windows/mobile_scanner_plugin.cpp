@@ -37,8 +37,6 @@ constexpr char kGenericError[] = "MOBILE_SCANNER_GENERIC_ERROR";
 constexpr char kNoCameraError[] = "MOBILE_SCANNER_NO_CAMERA_ERROR";
 constexpr char kPermissionDeniedError[] =
     "MOBILE_SCANNER_CAMERA_PERMISSION_DENIED";
-constexpr char kUnsupportedOperationError[] =
-    "MOBILE_SCANNER_UNSUPPORTED_OPERATION";
 
 // `MobileScannerAuthorizationState.authorized`. Windows has no runtime camera
 // permission prompt; access is controlled by the system privacy settings and
@@ -243,10 +241,11 @@ void MobileScannerPlugin::HandleMethodCall(
     // Webcams have no torch; `start` reports the torch as unavailable.
     result->Success();
   } else if (method == "setScale" || method == "resetScale") {
+    // Like the torch, zoom is ignored rather than failing, so that apps don't
+    // need a Windows specific check.
     // TODO: Support zoom through IAMCameraControl (CameraControl_Zoom) on
     // cameras that expose it.
-    result->Error(kUnsupportedOperationError,
-                  "Zooming is not supported on Windows.");
+    result->Success();
   } else if (method == "updateScanWindow") {
     UpdateScanWindow(args, std::move(result));
   } else if (method == "analyzeImage") {

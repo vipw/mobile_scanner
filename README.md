@@ -155,7 +155,7 @@ CMake build, so the first build needs network access.
 - Like on iOS, macOS and the web, UPC-A codes are reported as 13-digit `BarcodeFormat.ean13`
   (with a leading zero) unless `ean13` is left out of the requested formats. Android reports them
   as 12-digit `upcA`.
-- Zoom, torch and tap to focus are not supported.
+- Zoom, torch and tap to focus are not supported. Zoom and torch calls are ignored.
 
 ### Web
 
