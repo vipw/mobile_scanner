@@ -88,8 +88,9 @@ class MobileScannerPlugin : public flutter::Plugin {
   // be used from the platform thread, so results produced on the capture
   // thread must be sent through here.
   void PostToPlatformThread(std::function<void()> task);
-  std::optional<LRESULT> HandleWindowProc(HWND hwnd, UINT message,
-                                          WPARAM wparam, LPARAM lparam);
+  void RunPlatformThreadTasks();
+  static LRESULT CALLBACK TaskWindowProc(HWND hwnd, UINT message,
+                                         WPARAM wparam, LPARAM lparam);
 
   flutter::PluginRegistrarWindows* registrar_;
   flutter::TextureRegistrar* texture_registrar_;
@@ -102,9 +103,9 @@ class MobileScannerPlugin : public flutter::Plugin {
       device_orientation_channel_;
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
 
-  // Platform thread task queue.
-  int window_proc_delegate_id_ = -1;
-  UINT task_message_ = 0;
+  // Platform thread task queue. Tasks are run by a message-only window, which
+  // receives messages on the thread that created it.
+  HWND task_window_ = nullptr;
   std::mutex task_mutex_;
   std::deque<std::function<void()>> tasks_;
 

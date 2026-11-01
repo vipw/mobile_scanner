@@ -56,6 +56,9 @@ constexpr int kDetectionSpeedNormal = 1;
 // make them harder to scan.
 constexpr int kLiveMinLineCount = 3;
 
+constexpr wchar_t kTaskWindowClassName[] = L"MobileScannerPluginTaskWindow";
+constexpr UINT kRunTasksMessage = WM_APP;
+
 // `CameraLensType.normal`.
 constexpr int32_t kCameraLensTypeNormal = 0;
 
@@ -150,11 +153,20 @@ MobileScannerPlugin::MobileScannerPlugin(
   scan_worker_ = std::make_unique<WorkerThread>();
   analyze_worker_ = std::make_unique<WorkerThread>();
 
-  task_message_ = RegisterWindowMessage(L"MobileScannerPluginTask");
-  window_proc_delegate_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
-      [this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-        return HandleWindowProc(hwnd, message, wparam, lparam);
-      });
+  HINSTANCE module = nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCWSTR>(&TaskWindowProc), &module);
+  WNDCLASSW window_class = {};
+  window_class.lpfnWndProc = TaskWindowProc;
+  window_class.hInstance = module;
+  window_class.lpszClassName = kTaskWindowClassName;
+  // Fails harmlessly if another instance of the plugin registered it already.
+  RegisterClassW(&window_class);
+  task_window_ = CreateWindowExW(0, kTaskWindowClassName, L"", 0, 0, 0, 0, 0,
+                                 HWND_MESSAGE, nullptr, module, nullptr);
+  SetWindowLongPtrW(task_window_, GWLP_USERDATA,
+                    reinterpret_cast<LONG_PTR>(this));
 
   const auto& codec = flutter::StandardMethodCodec::GetInstance();
 
@@ -206,7 +218,7 @@ MobileScannerPlugin::~MobileScannerPlugin() {
   scan_worker_ = nullptr;
   analyze_worker_ = nullptr;
   UnregisterTexture();
-  registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_delegate_id_);
+  DestroyWindow(task_window_);
   MFShutdown();
 }
 
@@ -681,22 +693,10 @@ void MobileScannerPlugin::PostToPlatformThread(std::function<void()> task) {
     tasks_.push_back(std::move(task));
   }
 
-  flutter::FlutterView* view = registrar_->GetView();
-  if (view == nullptr) {
-    return;
-  }
-  HWND window = GetAncestor(view->GetNativeWindow(), GA_ROOT);
-  if (window != nullptr) {
-    PostMessage(window, task_message_, 0, 0);
-  }
+  PostMessageW(task_window_, kRunTasksMessage, 0, 0);
 }
 
-std::optional<LRESULT> MobileScannerPlugin::HandleWindowProc(HWND, UINT message,
-                                                             WPARAM, LPARAM) {
-  if (message != task_message_) {
-    return std::nullopt;
-  }
-
+void MobileScannerPlugin::RunPlatformThreadTasks() {
   std::deque<std::function<void()>> tasks;
   {
     std::lock_guard<std::mutex> lock(task_mutex_);
@@ -705,7 +705,21 @@ std::optional<LRESULT> MobileScannerPlugin::HandleWindowProc(HWND, UINT message,
   for (auto& task : tasks) {
     task();
   }
-  return 0;
+}
+
+// static
+LRESULT CALLBACK MobileScannerPlugin::TaskWindowProc(HWND hwnd, UINT message,
+                                                     WPARAM wparam,
+                                                     LPARAM lparam) {
+  if (message == kRunTasksMessage) {
+    auto* plugin = reinterpret_cast<MobileScannerPlugin*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (plugin != nullptr) {
+      plugin->RunPlatformThreadTasks();
+    }
+    return 0;
+  }
+  return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 }  // namespace mobile_scanner
