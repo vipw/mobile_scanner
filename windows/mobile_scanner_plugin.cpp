@@ -279,6 +279,10 @@ void MobileScannerPlugin::Start(const EncodableMap* args,
     result->Error(kAlreadyStartedError, "The scanner was already started.");
     return;
   }
+  if (task_window_ == nullptr) {
+    result->Error(kGenericError, "The scanner could not be initialized.");
+    return;
+  }
 
   {
     std::lock_guard<std::mutex> lock(scan_mutex_);
@@ -437,6 +441,10 @@ void MobileScannerPlugin::AnalyzeImage(const EncodableMap* args,
   const EncodableValue* file_path = GetArg(args, "filePath");
   if (file_path == nullptr || !std::holds_alternative<std::string>(*file_path)) {
     result->Error(kGenericError, "No file path was provided.");
+    return;
+  }
+  if (task_window_ == nullptr) {
+    result->Error(kGenericError, "The scanner could not be initialized.");
     return;
   }
 
