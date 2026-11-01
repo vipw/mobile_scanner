@@ -219,6 +219,7 @@ MobileScannerPlugin::~MobileScannerPlugin() {
   analyze_worker_ = nullptr;
   UnregisterTexture();
   DestroyWindow(task_window_);
+  CameraCapture::WaitForPendingReleases();
   MFShutdown();
 }
 
@@ -387,8 +388,7 @@ void MobileScannerPlugin::OnCaptureError(int generation, HRESULT hr) {
 
 void MobileScannerPlugin::StopCapture() {
   start_generation_++;
-  // Destroying the capture joins its thread, after which no more frames
-  // arrive.
+  // No more frames arrive once the capture is destroyed.
   capture_ = nullptr;
 }
 

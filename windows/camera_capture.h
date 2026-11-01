@@ -3,9 +3,9 @@
 
 #include <windows.h>
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -30,19 +30,20 @@ struct CameraDevice {
 // Lists the video capture devices, in system order.
 std::vector<CameraDevice> EnumerateCameras();
 
-// Captures frames from a single camera on a background thread using a Media
-// Foundation Source Reader, converting them to 32-bit BGRA.
+// Captures frames from a single camera using an asynchronous Media Foundation
+// Source Reader, converting them to 32-bit BGRA.
 class CameraCapture {
  public:
-  // Called once the camera is open (or failed to open), on the capture thread.
+  // Called once the camera is open (or failed to open), on a background
+  // thread.
   using StartedCallback = std::function<void(HRESULT hr, int width, int height)>;
-  // Called for every frame, on the capture thread. `stride` may be negative
-  // for bottom-up images, in which case `bgra` points to the top row.
+  // Called for every frame, on a Media Foundation thread. `stride` may be
+  // negative for bottom-up images, in which case `bgra` points to the top row.
   using FrameCallback =
       std::function<void(const uint8_t* bgra, int width, int height,
                          int stride)>;
   // Called when capturing stops unexpectedly after a successful start, for
-  // example when the camera is unplugged. Called on the capture thread.
+  // example when the camera is unplugged. Called on a Media Foundation thread.
   using ErrorCallback = std::function<void(HRESULT hr)>;
 
   CameraCapture() = default;
@@ -51,7 +52,7 @@ class CameraCapture {
   CameraCapture(const CameraCapture&) = delete;
   CameraCapture& operator=(const CameraCapture&) = delete;
 
-  // Opens the camera and starts capturing on a background thread. The
+  // Opens the camera on a background thread and starts capturing. The
   // resolution closest to `preferred_resolution` (or 1280x720 if not given)
   // is used.
   void Start(const std::wstring& symbolic_link,
@@ -59,18 +60,25 @@ class CameraCapture {
              StartedCallback on_started, FrameCallback on_frame,
              ErrorCallback on_error);
 
-  // Stops capturing and waits for the capture thread to exit. No callbacks
-  // are invoked after this returns.
+  // Stops capturing. Frame and error callbacks are not invoked after this
+  // returns. Waits for the camera to finish opening, but not for the next
+  // frame; the camera itself is released in the background.
   void Stop();
 
- private:
-  void Run(std::wstring symbolic_link,
-           std::optional<std::pair<int, int>> preferred_resolution,
-           StartedCallback on_started, FrameCallback on_frame,
-           ErrorCallback on_error);
+  // Waits until all stopped cameras have been released. Must be called
+  // before MFShutdown.
+  static void WaitForPendingReleases();
 
-  std::thread thread_;
-  std::atomic<bool> stop_requested_ = false;
+ private:
+  struct State;
+  class ReaderCallback;
+
+  static void Open(std::shared_ptr<State> state, std::wstring symbolic_link,
+                   std::optional<std::pair<int, int>> preferred_resolution,
+                   StartedCallback on_started);
+
+  std::thread open_thread_;
+  std::shared_ptr<State> state_;
 };
 
 // Returns a human readable message for the given HRESULT.

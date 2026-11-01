@@ -13,11 +13,14 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 namespace mobile_scanner {
@@ -30,6 +33,11 @@ constexpr DWORD kVideoStream =
     static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 720;
+
+// Cameras that have been stopped but are still being released.
+std::mutex g_release_mutex;
+std::condition_variable g_release_done;
+int g_pending_releases = 0;
 
 // Panel values from the ACPI _PLD (physical location of device) buffer.
 constexpr BYTE kPldPanelFront = 4;
@@ -131,8 +139,13 @@ HRESULT SelectNativeMediaType(IMFSourceReader* reader, int preferred_width,
   return *selected ? S_OK : MF_E_INVALIDMEDIATYPE;
 }
 
+// Opens the camera in asynchronous mode: samples are requested with
+// ReadSample and delivered to `callback`. `source` is set as soon as the
+// camera is opened, so that it can be shut down if a later step fails.
 HRESULT OpenReader(const std::wstring& symbolic_link,
                    std::optional<std::pair<int, int>> preferred_resolution,
+                   IMFSourceReaderCallback* callback,
+                   ComPtr<IMFMediaSource>* source,
                    ComPtr<IMFSourceReader>* reader) {
   ComPtr<IMFAttributes> source_attributes;
   HRESULT hr = MFCreateAttributes(&source_attributes, 2);
@@ -147,30 +160,31 @@ HRESULT OpenReader(const std::wstring& symbolic_link,
         symbolic_link.c_str());
   }
 
-  ComPtr<IMFMediaSource> source;
   if (SUCCEEDED(hr)) {
-    hr = MFCreateDeviceSource(source_attributes.Get(), &source);
+    hr = MFCreateDeviceSource(source_attributes.Get(),
+                              source->ReleaseAndGetAddressOf());
   }
 
   // Advanced video processing lets the reader decode compressed formats and
   // convert to RGB32.
   ComPtr<IMFAttributes> reader_attributes;
   if (SUCCEEDED(hr)) {
-    hr = MFCreateAttributes(&reader_attributes, 1);
+    hr = MFCreateAttributes(&reader_attributes, 2);
   }
   if (SUCCEEDED(hr)) {
     hr = reader_attributes->SetUINT32(
         MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
   }
   if (SUCCEEDED(hr)) {
-    hr = MFCreateSourceReaderFromMediaSource(source.Get(),
+    hr = reader_attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK,
+                                       callback);
+  }
+  if (SUCCEEDED(hr)) {
+    hr = MFCreateSourceReaderFromMediaSource(source->Get(),
                                              reader_attributes.Get(),
                                              reader->ReleaseAndGetAddressOf());
   }
   if (FAILED(hr)) {
-    if (source) {
-      source->Shutdown();
-    }
     return hr;
   }
 
@@ -275,71 +289,80 @@ std::vector<CameraDevice> EnumerateCameras() {
   return cameras;
 }
 
-CameraCapture::~CameraCapture() { Stop(); }
-
-void CameraCapture::Start(
-    const std::wstring& symbolic_link,
-    std::optional<std::pair<int, int>> preferred_resolution,
-    StartedCallback on_started, FrameCallback on_frame,
-    ErrorCallback on_error) {
-  Stop();
-  stop_requested_ = false;
-  thread_ = std::thread(&CameraCapture::Run, this, symbolic_link,
-                        preferred_resolution, std::move(on_started),
-                        std::move(on_frame), std::move(on_error));
-}
-
-void CameraCapture::Stop() {
-  stop_requested_ = true;
-  if (thread_.joinable()) {
-    thread_.join();
-  }
-}
-
-void CameraCapture::Run(std::wstring symbolic_link,
-                        std::optional<std::pair<int, int>> preferred_resolution,
-                        StartedCallback on_started, FrameCallback on_frame,
-                        ErrorCallback on_error) {
-  const HRESULT co_init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
+// State shared between the capture and the reader callback, which Media
+// Foundation may keep alive after the capture is stopped.
+struct CameraCapture::State {
+  // Guards everything below. Held while a frame is delivered, so that once
+  // `stopped` is set no callback is running or will run.
+  std::mutex mutex;
+  bool stopped = false;
+  ComPtr<IMFMediaSource> source;
   ComPtr<IMFSourceReader> reader;
   FrameFormat format;
-  HRESULT hr = OpenReader(symbolic_link, preferred_resolution, &reader);
-  if (SUCCEEDED(hr)) {
-    hr = GetFrameFormat(reader.Get(), &format);
-  }
-  on_started(hr, format.width, format.height);
+  FrameCallback on_frame;
+  ErrorCallback on_error;
+};
 
-  while (SUCCEEDED(hr) && !stop_requested_) {
-    DWORD flags = 0;
-    LONGLONG timestamp = 0;
-    ComPtr<IMFSample> sample;
-    hr = reader->ReadSample(kVideoStream, 0, nullptr, &flags, &timestamp,
-                            &sample);
-    if (stop_requested_) {
-      break;
-    }
-    if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_ERROR)) {
-      hr = MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED;
-    } else if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
-      hr = MF_E_END_OF_STREAM;
-    }
-    if (FAILED(hr)) {
-      on_error(hr);
-      break;
-    }
+class CameraCapture::ReaderCallback
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IMFSourceReaderCallback> {
+ public:
+  explicit ReaderCallback(std::shared_ptr<State> state)
+      : state_(std::move(state)) {}
 
-    if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-      hr = GetFrameFormat(reader.Get(), &format);
+  STDMETHODIMP OnReadSample(HRESULT hr, DWORD, DWORD flags, LONGLONG,
+                            IMFSample* sample) override {
+    ComPtr<IMFSourceReader> reader;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (state_->stopped) {
+        return S_OK;
+      }
+      if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_ERROR)) {
+        hr = MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED;
+      } else if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_ENDOFSTREAM)) {
+        hr = MF_E_END_OF_STREAM;
+      }
+      if (SUCCEEDED(hr) && (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
+        hr = GetFrameFormat(state_->reader.Get(), &state_->format);
+      }
       if (FAILED(hr)) {
-        on_error(hr);
-        break;
+        state_->stopped = true;
+        state_->on_error(hr);
+        return S_OK;
+      }
+      if (sample != nullptr) {
+        DeliverFrame(sample);
+      }
+      reader = state_->reader;
+    }
+
+    // Request the next frame outside the lock, in case the reader calls back
+    // synchronously.
+    hr = reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr,
+                            nullptr);
+    if (FAILED(hr)) {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!state_->stopped) {
+        state_->stopped = true;
+        state_->on_error(hr);
       }
     }
+    return S_OK;
+  }
 
+  STDMETHODIMP OnFlush(DWORD) override { return S_OK; }
+
+  STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override { return S_OK; }
+
+ private:
+  // Must be called with the state lock held.
+  void DeliverFrame(IMFSample* sample) {
+    const FrameFormat& format = state_->format;
     ComPtr<IMFMediaBuffer> buffer;
-    if (!sample || FAILED(sample->GetBufferByIndex(0, &buffer))) {
-      continue;
+    if (FAILED(sample->GetBufferByIndex(0, &buffer))) {
+      return;
     }
 
     // Prefer the 2D buffer interface, which reports the actual pitch.
@@ -348,25 +371,160 @@ void CameraCapture::Run(std::wstring symbolic_link,
     LONG pitch = 0;
     if (SUCCEEDED(buffer.As(&buffer_2d)) &&
         SUCCEEDED(buffer_2d->Lock2D(&scanline0, &pitch))) {
-      on_frame(scanline0, format.width, format.height, pitch);
+      state_->on_frame(scanline0, format.width, format.height, pitch);
       buffer_2d->Unlock2D();
-    } else {
-      BYTE* data = nullptr;
-      if (SUCCEEDED(buffer->Lock(&data, nullptr, nullptr))) {
-        pitch = format.default_stride;
-        if (pitch < 0) {
-          // Bottom-up image: the top row is the last one in memory.
-          data += static_cast<ptrdiff_t>(-pitch) * (format.height - 1);
-        }
-        on_frame(data, format.width, format.height, pitch);
-        buffer->Unlock();
+      return;
+    }
+
+    BYTE* data = nullptr;
+    if (SUCCEEDED(buffer->Lock(&data, nullptr, nullptr))) {
+      pitch = format.default_stride;
+      if (pitch < 0) {
+        // Bottom-up image: the top row is the last one in memory.
+        data += static_cast<ptrdiff_t>(-pitch) * (format.height - 1);
       }
+      state_->on_frame(data, format.width, format.height, pitch);
+      buffer->Unlock();
     }
   }
 
-  if (reader) {
-    reader.Reset();
+  std::shared_ptr<State> state_;
+};
+
+CameraCapture::~CameraCapture() { Stop(); }
+
+void CameraCapture::Start(
+    const std::wstring& symbolic_link,
+    std::optional<std::pair<int, int>> preferred_resolution,
+    StartedCallback on_started, FrameCallback on_frame,
+    ErrorCallback on_error) {
+  Stop();
+  state_ = std::make_shared<State>();
+  state_->on_frame = std::move(on_frame);
+  state_->on_error = std::move(on_error);
+  open_thread_ = std::thread(&CameraCapture::Open, state_, symbolic_link,
+                             preferred_resolution, std::move(on_started));
+}
+
+void CameraCapture::Stop() {
+  if (!state_) {
+    return;
   }
+
+  // Waits at most for the frame that is being delivered, not for the camera
+  // to produce the next one.
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->stopped = true;
+  }
+  // Wake up the open thread if it is waiting for a previous camera to be
+  // released.
+  {
+    std::lock_guard<std::mutex> lock(g_release_mutex);
+  }
+  g_release_done.notify_all();
+  if (open_thread_.joinable()) {
+    open_thread_.join();
+  }
+
+  // Moving the reader out of the state also breaks the cycle between the
+  // reader, its callback and the state.
+  ComPtr<IMFMediaSource> source;
+  ComPtr<IMFSourceReader> reader;
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    source = std::move(state_->source);
+    reader = std::move(state_->reader);
+  }
+  state_ = nullptr;
+  if (!source && !reader) {
+    return;
+  }
+
+  // Releasing the camera can take several hundred milliseconds, so it is done
+  // in the background.
+  {
+    std::lock_guard<std::mutex> lock(g_release_mutex);
+    g_pending_releases++;
+  }
+  std::thread([source = std::move(source),
+               reader = std::move(reader)]() mutable {
+    const HRESULT co_init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (source) {
+      source->Shutdown();
+    }
+    reader.Reset();
+    source.Reset();
+    if (SUCCEEDED(co_init)) {
+      CoUninitialize();
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_release_mutex);
+      g_pending_releases--;
+    }
+    g_release_done.notify_all();
+  }).detach();
+}
+
+// static
+void CameraCapture::WaitForPendingReleases() {
+  std::unique_lock<std::mutex> lock(g_release_mutex);
+  g_release_done.wait(lock, [] { return g_pending_releases == 0; });
+}
+
+// static
+void CameraCapture::Open(std::shared_ptr<State> state,
+                         std::wstring symbolic_link,
+                         std::optional<std::pair<int, int>> preferred_resolution,
+                         StartedCallback on_started) {
+  const HRESULT co_init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+  // A camera that is still being released may not be opened again yet.
+  bool stopped = false;
+  {
+    std::unique_lock<std::mutex> lock(g_release_mutex);
+    g_release_done.wait(lock, [&] {
+      std::lock_guard<std::mutex> state_lock(state->mutex);
+      stopped = state->stopped;
+      return stopped || g_pending_releases == 0;
+    });
+  }
+
+  ComPtr<ReaderCallback> callback =
+      Microsoft::WRL::Make<ReaderCallback>(state);
+  ComPtr<IMFMediaSource> source;
+  ComPtr<IMFSourceReader> reader;
+  FrameFormat format;
+  HRESULT hr = stopped ? E_ABORT : callback ? S_OK : E_OUTOFMEMORY;
+  if (SUCCEEDED(hr)) {
+    hr = OpenReader(symbolic_link, preferred_resolution, callback.Get(),
+                    &source, &reader);
+  }
+  if (SUCCEEDED(hr)) {
+    hr = GetFrameFormat(reader.Get(), &format);
+  }
+
+  bool started = false;
+  if (SUCCEEDED(hr)) {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!state->stopped) {
+      state->source = source;
+      state->reader = reader;
+      state->format = format;
+      started = true;
+    }
+  }
+  if (started) {
+    hr = reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr,
+                            nullptr);
+  }
+  if (!started || FAILED(hr)) {
+    if (source) {
+      source->Shutdown();
+    }
+  }
+  on_started(hr, format.width, format.height);
+
   if (SUCCEEDED(co_init)) {
     CoUninitialize();
   }
