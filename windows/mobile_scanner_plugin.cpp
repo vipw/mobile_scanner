@@ -316,7 +316,10 @@ void MobileScannerPlugin::Start(const EncodableMap* args,
         return device.facing == requested_facing;
       });
   const CameraDevice& device = camera != cameras.end() ? *camera : cameras[0];
-  mirror_ = device.facing == kCameraFacingFront;
+  // Like on the web, only cameras known to face away from the user are not
+  // mirrored. Desktop webcams nearly always face the user, even when they
+  // don't report it.
+  mirror_ = device.facing != kCameraFacingBack;
 
   std::optional<std::pair<int, int>> resolution;
   if (const EncodableValue* value = GetArg(args, "cameraResolution")) {

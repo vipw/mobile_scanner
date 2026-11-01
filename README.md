@@ -149,8 +149,9 @@ CMake build, so the first build needs network access.
 - Cameras built into a device report whether they are front or back facing; other cameras, such as
   USB webcams, are reported as `CameraFacing.external`. When no camera has the requested facing, the
   first camera is used.
-- Like a selfie camera on mobile, the preview of a front facing camera is mirrored. Barcode corners
-  and the image from `returnImage` are mirrored to match.
+- Like on the web, the preview is mirrored unless the camera is known to be back facing, since
+  desktop webcams nearly always face the user. Barcode corners and the image from `returnImage` are
+  mirrored to match.
 - Like on iOS, macOS and the web, UPC-A codes are reported as 13-digit `BarcodeFormat.ean13`
   (with a leading zero) unless `ean13` is left out of the requested formats. Android reports them
   as 12-digit `upcA`.
