@@ -558,6 +558,11 @@ void MobileScannerPlugin::ScanFrame(int generation, int width, int height,
 
   {
     std::lock_guard<std::mutex> lock(scan_mutex_);
+    // Don't let a scan from a stopped or paused capture overwrite the state
+    // that `start` has reset.
+    if (generation != start_generation_) {
+      return;
+    }
     last_scan_time_ = std::chrono::steady_clock::now();
 
     if (detection_speed_ == kDetectionSpeedNoDuplicates) {

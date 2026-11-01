@@ -112,7 +112,7 @@ class MobileScannerPlugin : public flutter::Plugin {
   // started or stopped, so that late callbacks from an earlier capture are
   // ignored.
   std::unique_ptr<CameraCapture> capture_;
-  int start_generation_ = 0;
+  std::atomic<int> start_generation_ = 0;
   // Whether to mirror the preview horizontally, like a front facing camera
   // on mobile devices.
   std::atomic<bool> mirror_ = false;
