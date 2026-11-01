@@ -167,17 +167,19 @@ std::vector<ContentLine> ParseContentLines(const std::string& text) {
 
   std::vector<std::string> logical_lines;
   for (const std::string& physical : physical_lines) {
-    if (!logical_lines.empty() && !physical.empty() &&
-        (physical[0] == ' ' || physical[0] == '\t')) {
-      // RFC folding: a line starting with whitespace continues the previous.
-      logical_lines.back() += physical.substr(1);
-    } else if (!logical_lines.empty() && !logical_lines.back().empty() &&
-               logical_lines.back().back() == '=' &&
-               ToUpper(logical_lines.back()).find("QUOTED-PRINTABLE") !=
-                   std::string::npos) {
+    // Checked before folding, since the continuation of a soft line break can
+    // start with whitespace that is part of the value.
+    if (!logical_lines.empty() && !logical_lines.back().empty() &&
+        logical_lines.back().back() == '=' &&
+        ToUpper(logical_lines.back()).find("QUOTED-PRINTABLE") !=
+            std::string::npos) {
       // Quoted-printable soft line break.
       logical_lines.back().pop_back();
       logical_lines.back() += physical;
+    } else if (!logical_lines.empty() && !physical.empty() &&
+               (physical[0] == ' ' || physical[0] == '\t')) {
+      // RFC folding: a line starting with whitespace continues the previous.
+      logical_lines.back() += physical.substr(1);
     } else if (!Trim(physical).empty()) {
       logical_lines.push_back(physical);
     }
