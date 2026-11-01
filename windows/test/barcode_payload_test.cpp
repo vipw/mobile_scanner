@@ -117,6 +117,12 @@ TEST(AddBarcodePayload, EmailDecodesQuery) {
   EXPECT_EQ(String(email, "body"), "x y");
 }
 
+TEST(AddBarcodePayload, EmailKeepsPlusInAddress) {
+  const EncodableMap email =
+      Map(Parse("mailto:john+orders@example.com"), "email");
+  EXPECT_EQ(String(email, "address"), "john+orders@example.com");
+}
+
 TEST(AddBarcodePayload, Phone) {
   EXPECT_EQ(String(Map(Parse("TEL:+31 6 1234"), "phone"), "number"),
             "+31 6 1234");

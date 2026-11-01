@@ -83,7 +83,7 @@ bool IsProductCode(const std::string& text) {
   return digits == 8 || digits == 12 || digits == 13;
 }
 
-std::string PercentDecode(const std::string& value) {
+std::string PercentDecode(const std::string& value, bool plus_as_space = true) {
   std::string decoded;
   for (size_t i = 0; i < value.size(); i++) {
     if (value[i] == '%' && i + 2 < value.size() &&
@@ -92,7 +92,7 @@ std::string PercentDecode(const std::string& value) {
       decoded += static_cast<char>(
           std::strtol(value.substr(i + 1, 2).c_str(), nullptr, 16));
       i += 2;
-    } else if (value[i] == '+') {
+    } else if (value[i] == '+' && plus_as_space) {
       decoded += ' ';
     } else {
       decoded += value[i];
@@ -287,8 +287,9 @@ EncodableMap ParseEmail(const std::string& text) {
   const std::string query =
       question == std::string::npos ? "" : body.substr(question + 1);
   return EncodableMap{
+      // '+' is a literal character in addresses (RFC 6068).
       {EncodableValue("address"),
-       EncodableValue(PercentDecode(body.substr(0, question)))},
+       EncodableValue(PercentDecode(body.substr(0, question), false))},
       {EncodableValue("subject"),
        OptionalString(QueryParameter(query, "subject"))},
       {EncodableValue("body"), OptionalString(QueryParameter(query, "body"))},
