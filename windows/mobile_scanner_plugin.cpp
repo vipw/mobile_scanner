@@ -382,7 +382,8 @@ void MobileScannerPlugin::OnCaptureError(int generation, HRESULT hr) {
   if (generation != start_generation_) {
     return;
   }
-  // The capture thread has exited, so release it to allow starting again.
+  // The capture has stopped delivering frames. Release it, so that `start`
+  // does not fail with kAlreadyStartedError.
   StopCapture();
   if (event_sink_) {
     event_sink_->Error(kCameraError, HResultMessage(hr));

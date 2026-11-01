@@ -83,7 +83,8 @@ bool IsProductCode(const std::string& text) {
   return digits == 8 || digits == 12 || digits == 13;
 }
 
-std::string PercentDecode(const std::string& value, bool plus_as_space = true) {
+std::string PercentDecode(const std::string& value,
+                          bool plus_as_space = true) {
   std::string decoded;
   for (size_t i = 0; i < value.size(); i++) {
     if (value[i] == '%' && i + 2 < value.size() &&
