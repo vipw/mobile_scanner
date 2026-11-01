@@ -292,7 +292,6 @@ void MobileScannerPlugin::Start(const EncodableMap* args,
     return_image_ = return_image != nullptr &&
                     std::holds_alternative<bool>(*return_image) &&
                     std::get<bool>(*return_image);
-    paused_ = false;
     last_scanned_values_.clear();
     last_scan_time_ = {};
   }
@@ -395,20 +394,12 @@ void MobileScannerPlugin::StopCapture() {
 void MobileScannerPlugin::Stop(MethodResult result) {
   StopCapture();
   UnregisterTexture();
-  {
-    std::lock_guard<std::mutex> lock(scan_mutex_);
-    paused_ = false;
-  }
   result->Success();
 }
 
 void MobileScannerPlugin::Pause(MethodResult result) {
   // Release the camera but keep the texture, so the last frame stays visible.
   StopCapture();
-  {
-    std::lock_guard<std::mutex> lock(scan_mutex_);
-    paused_ = true;
-  }
   result->Success();
 }
 
@@ -516,9 +507,9 @@ void MobileScannerPlugin::OnFrame(int generation, const uint8_t* bgra,
 
   {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    if (paused_ || (detection_speed_ == kDetectionSpeedNormal &&
-                    std::chrono::steady_clock::now() - last_scan_time_ <
-                        std::chrono::milliseconds(detection_timeout_ms_))) {
+    if (detection_speed_ == kDetectionSpeedNormal &&
+        std::chrono::steady_clock::now() - last_scan_time_ <
+            std::chrono::milliseconds(detection_timeout_ms_)) {
       return;
     }
   }

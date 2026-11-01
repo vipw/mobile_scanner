@@ -149,7 +149,6 @@ class MobileScannerPlugin : public flutter::Plugin {
   int detection_speed_ = 0;
   int detection_timeout_ms_ = 250;
   bool return_image_ = false;
-  bool paused_ = false;
   std::chrono::steady_clock::time_point last_scan_time_;
   std::vector<std::string> last_scanned_values_;
 };
